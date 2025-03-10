@@ -1,0 +1,199 @@
+import os
+import argparse
+import numpy as np
+from tqdm import tqdm
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torchvision.utils import save_image
+
+# Import your model classes
+from model import Generator, Discriminator
+
+# Initialize weights as in the DCGAN paper
+def weights_init(m):
+    """
+    Initialize network weights according to the DCGAN paper
+    Args:
+        m: Module to initialize
+    """
+    classname = m.__class__.__name__
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d) or isinstance(m, nn.Linear):
+        nn.init.normal_(m.weight.data, 0.0, 0.02)
+    elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
+        nn.init.normal_(m.weight.data, 1.0, 0.02)
+        nn.init.constant_(m.bias.data, 0)
+
+def train_dcgan(args):
+    """
+    Train the DCGAN model
+    
+    Args:
+        args: Command line arguments containing training parameters
+    """
+    # Set random seed for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    
+    # Create directories for saving results
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'models'), exist_ok=True)
+    os.makedirs(os.path.join(args.output_dir, 'images'), exist_ok=True)
+    
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
+    print(f"Using device: {device}")
+    
+    # Data loading based on dataset choice
+    if args.dataset == 'celeba':
+        transform = transforms.Compose([
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.CenterCrop(args.img_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+        dataset = datasets.ImageFolder(root=args.data_dir, transform=transform)
+        channels = 3
+    elif args.dataset == 'lsun':
+        # For LSUN, you'll need to download the LSUN dataset separately
+        transform = transforms.Compose([
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+        dataset = datasets.LSUN(root=args.data_dir, classes=['bedroom_train'], transform=transform)
+        channels = 3
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+    
+    # Create the dataloader
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    
+    # Initialize models
+    generator = Generator(
+        latent_dim=args.latent_dim,
+        channels=channels,
+        img_size=args.img_size
+    ).to(device)
+    
+    discriminator = Discriminator(
+        channels=channels,
+        img_size=args.img_size
+    ).to(device)
+    
+    # Apply weights initialization
+    generator.apply(weights_init)
+    discriminator.apply(weights_init)
+    
+    # Loss function
+    adversarial_loss = nn.BCEWithLogitsLoss()
+    
+    # Optimizers with settings from the paper
+    optimizer_G = optim.Adam(generator.parameters(), lr=args.lr, betas=(args.beta1, 0.999))
+    optimizer_D = optim.Adam(discriminator.parameters(), lr=args.lr, betas=(args.beta1, 0.999))
+    
+    # Fixed noise for generating sample images
+    fixed_noise = torch.randn(64, args.latent_dim, device=device)
+    
+    # Training loop
+    for epoch in range(args.n_epochs):
+        progress_bar = tqdm(enumerate(dataloader), total=len(dataloader))
+        for i, (real_imgs, _) in progress_bar:
+            # Configure input
+            real_imgs = real_imgs.to(device)
+            batch_size = real_imgs.size(0)
+            
+            # Labels for real and fake images
+            real_label = torch.ones(batch_size, 1, device=device)
+            fake_label = torch.zeros(batch_size, 1, device=device)
+            
+            # -----------------
+            # Train Generator
+            # -----------------
+            optimizer_G.zero_grad()
+            
+            # Generate fake images
+            z = torch.randn(batch_size, args.latent_dim, device=device)
+            fake_imgs = generator(z)
+            
+            # Generator's loss
+            g_loss = adversarial_loss(discriminator(fake_imgs), real_label)
+            
+            g_loss.backward()
+            optimizer_G.step()
+            
+            # -----------------
+            # Train Discriminator
+            # -----------------
+            optimizer_D.zero_grad()
+            
+            # Loss for real images
+            real_pred = discriminator(real_imgs)
+            d_real_loss = adversarial_loss(real_pred, real_label)
+            
+            # Loss for fake images
+            fake_pred = discriminator(fake_imgs.detach())
+            d_fake_loss = adversarial_loss(fake_pred, fake_label)
+            
+            # Total discriminator loss
+            d_loss = (d_real_loss + d_fake_loss) / 2
+            
+            d_loss.backward()
+            optimizer_D.step()
+            
+            # Update progress bar
+            progress_bar.set_description(
+                f"[Epoch {epoch}/{args.n_epochs}] "
+                f"[D loss: {d_loss.item():.4f}] "
+                f"[G loss: {g_loss.item():.4f}]"
+            )
+            
+            # Save sample images at regular intervals
+            batches_done = epoch * len(dataloader) + i
+            if batches_done % args.sample_interval == 0:
+                with torch.no_grad():
+                    generator.eval()
+                    sample_images = generator(fixed_noise)
+                    generator.train()
+                
+                save_image(
+                    sample_images.data[:25],
+                    os.path.join(args.output_dir, 'images', f"{batches_done:d}.png"),
+                    nrow=5,
+                    normalize=True
+                )
+        
+        # Save models after each epoch
+        if (epoch + 1) % args.save_interval == 0 or epoch == args.n_epochs - 1:
+            torch.save(generator.state_dict(), os.path.join(args.output_dir, 'models', f"generator_epoch_{epoch+1}.pth"))
+            torch.save(discriminator.state_dict(), os.path.join(args.output_dir, 'models', f"discriminator_epoch_{epoch+1}.pth"))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="celeba", choices=["celeba", "lsun"], help="dataset to use (celeba or lsun)")
+    parser.add_argument("--data_dir", type=str, required=True, help="path to dataset")
+    parser.add_argument("--output_dir", type=str, default="results", help="directory to save output")
+    parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
+    parser.add_argument("--batch_size", type=int, default=128, help="size of the batches")
+    parser.add_argument("--latent_dim", type=int, default=100, help="dimensionality of the latent space")
+    parser.add_argument("--lr", type=float, default=0.0002, help="learning rate")
+    parser.add_argument("--beta1", type=float, default=0.5, help="adam: decay of first order momentum of gradient")
+    parser.add_argument("--img_size", type=int, default=64, help="size of each image dimension")
+    parser.add_argument("--sample_interval", type=int, default=500, help="interval between image samples")
+    parser.add_argument("--save_interval", type=int, default=10, help="interval between model saves")
+    parser.add_argument("--seed", type=int, default=42, help="random seed")
+    parser.add_argument("--num_workers", type=int, default=4, help="number of worker threads for dataloader")
+    parser.add_argument("--no_cuda", action="store_true", help="avoid using CUDA when available")
+    
+    args = parser.parse_args()
+    train_dcgan(args)

@@ -1,0 +1,70 @@
+import os
+import argparse
+import torch
+import numpy as np
+from torchvision.utils import save_image
+from model import Generator
+
+def generate_images(args):
+    """
+    Generate images using a pretrained DCGAN generator
+    
+    Args:
+        args: Command line arguments
+    """
+    # Set random seed for reproducibility
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Set the device
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    
+    # Initialize the generator
+    generator = Generator(
+        latent_dim=args.latent_dim,
+        channels=args.channels,
+        img_size=args.img_size
+    ).to(device)
+    
+    # Load the pretrained model
+    generator.load_state_dict(torch.load(args.model_path, map_location=device))
+    generator.eval()
+    
+    # Generate images
+    with torch.no_grad():
+        # Generate multiple batches if needed
+        for i in range(args.n_batches):
+            # Create random noise vector
+            z = torch.randn(args.batch_size, args.latent_dim, device=device)
+            
+            # Generate fake images
+            fake_imgs = generator(z)
+            
+            # Save images
+            for j in range(fake_imgs.size(0)):
+                save_image(
+                    fake_imgs[j], 
+                    os.path.join(args.output_dir, f"generated_{i * args.batch_size + j:03d}.png"),
+                    normalize=True
+                )
+    
+    print(f"Generated {args.n_batches * args.batch_size} images in {args.output_dir}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, required=True, help="path to the generator model")
+    parser.add_argument("--output_dir", type=str, default="generated", help="directory to save generated images")
+    parser.add_argument("--latent_dim", type=int, default=100, help="dimensionality of the latent space")
+    parser.add_argument("--channels", type=int, default=3, help="number of image channels")
+    parser.add_argument("--img_size", type=int, default=64, help="size of each image dimension")
+    parser.add_argument("--batch_size", type=int, default=64, help="number of images to generate in each batch")
+    parser.add_argument("--n_batches", type=int, default=1, help="number of batches to generate")
+    parser.add_argument("--seed", type=int, default=None, help="random seed for reproducibility")
+    parser.add_argument("--no_cuda", action="store_true", help="avoid using CUDA when available")
+    
+    args = parser.parse_args()
+    generate_images(args)

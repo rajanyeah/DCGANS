@@ -1,0 +1,167 @@
+import os
+import glob
+import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import torch
+from torchvision.utils import make_grid
+
+def load_image(path):
+    """
+    Load and convert an image to a numpy array
+    
+    Args:
+        path: Path to the image file
+        
+    Returns:
+        numpy.ndarray: Image as a numpy array in range [0, 1]
+    """
+    img = Image.open(path)
+    img_np = np.array(img) / 255.0
+    return img_np
+
+def visualize_training_progress(args):
+    """
+    Create a grid image showing the generator's progress over training
+    
+    Args:
+        args: Command line arguments
+    """
+    # Find all sample images
+    image_paths = sorted(glob.glob(os.path.join(args.image_dir, "*.png")))
+    
+    if not image_paths:
+        print(f"No images found in {args.image_dir}")
+        return
+    
+    # Select a subset of images at regular intervals to show progress
+    num_images = len(image_paths)
+    
+    if args.num_samples >= num_images:
+        selected_paths = image_paths
+    else:
+        indices = np.linspace(0, num_images - 1, args.num_samples, dtype=int)
+        selected_paths = [image_paths[i] for i in indices]
+    
+    # Load images
+    images = [load_image(path) for path in selected_paths]
+    
+    # Extract iteration numbers from filenames
+    iterations = [int(os.path.basename(path).split('.')[0]) for path in selected_paths]
+    
+    # Create a figure
+    fig, axs = plt.subplots(int(np.ceil(len(images) / 5)), 5, figsize=(15, 3 * np.ceil(len(images) / 5)))
+    axs = axs.flatten()
+    
+    # Display images
+    for i, (img, iteration) in enumerate(zip(images, iterations)):
+        axs[i].imshow(img)
+        axs[i].set_title(f"Iteration {iteration}")
+        axs[i].axis('off')
+    
+    # Hide empty subplots
+    for i in range(len(images), len(axs)):
+        axs[i].axis('off')
+    
+    plt.tight_layout()
+    
+    # Save or show the figure
+    if args.output_path:
+        plt.savefig(args.output_path, dpi=300, bbox_inches='tight')
+        print(f"Progress visualization saved to {args.output_path}")
+    else:
+        plt.show()
+
+def interpolate_latent_space(args):
+    """
+    Generate images by interpolating between points in the latent space
+    
+    Args:
+        args: Command line arguments
+    """
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    
+    # Load generator model
+    from model import Generator
+    generator = Generator(
+        latent_dim=args.latent_dim,
+        channels=args.channels,
+        img_size=args.img_size
+    ).to(device)
+    generator.load_state_dict(torch.load(args.model_path, map_location=device))
+    generator.eval()
+    
+    # Create two random points in latent space
+    z1 = torch.randn(1, args.latent_dim, device=device)
+    z2 = torch.randn(1, args.latent_dim, device=device)
+    
+    # Generate images through interpolation
+    alphas = np.linspace(0, 1, args.num_steps)
+    generated_images = []
+    
+    with torch.no_grad():
+        for alpha in alphas:
+            # Linear interpolation in the latent space
+            z_interp = (1 - alpha) * z1 + alpha * z2
+            
+            # Generate image
+            img = generator(z_interp)
+            
+            # Convert to grid image
+            img_grid = make_grid(img, normalize=True)
+            img_grid = img_grid.cpu().numpy().transpose((1, 2, 0))
+            generated_images.append(img_grid)
+    
+    # Create a figure
+    fig, axs = plt.subplots(2, int(np.ceil(len(generated_images) / 2)), figsize=(15, 6))
+    axs = axs.flatten()
+    
+    # Display images
+    for i, (img, alpha) in enumerate(zip(generated_images, alphas)):
+        axs[i].imshow(img)
+        axs[i].set_title(f"alpha={alpha:.2f}")
+        axs[i].axis('off')
+    
+    # Hide empty subplots
+    for i in range(len(generated_images), len(axs)):
+        axs[i].axis('off')
+    
+    plt.tight_layout()
+    
+    # Save or show the figure
+    if args.output_path:
+        plt.savefig(args.output_path, dpi=300, bbox_inches='tight')
+        print(f"Latent space interpolation saved to {args.output_path}")
+    else:
+        plt.show()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="DCGAN Visualization Tools")
+    subparsers = parser.add_subparsers(dest="command", help="sub-command help")
+    
+    # Training progress visualization
+    progress_parser = subparsers.add_parser("progress", help="Visualize training progress")
+    progress_parser.add_argument("--image_dir", type=str, required=True, help="directory containing sample images")
+    progress_parser.add_argument("--num_samples", type=int, default=10, help="number of samples to include in visualization")
+    progress_parser.add_argument("--output_path", type=str, default=None, help="path to save visualization (if not specified, display instead)")
+    
+    # Latent space interpolation
+    interp_parser = subparsers.add_parser("interpolate", help="Interpolate in latent space")
+    interp_parser.add_argument("--model_path", type=str, required=True, help="path to the generator model")
+    interp_parser.add_argument("--latent_dim", type=int, default=100, help="dimensionality of the latent space")
+    interp_parser.add_argument("--channels", type=int, default=3, help="number of image channels")
+    interp_parser.add_argument("--img_size", type=int, default=64, help="size of each image dimension")
+    interp_parser.add_argument("--num_steps", type=int, default=10, help="number of interpolation steps")
+    interp_parser.add_argument("--output_path", type=str, default=None, help="path to save visualization (if not specified, display instead)")
+    interp_parser.add_argument("--no_cuda", action="store_true", help="avoid using CUDA when available")
+    
+    args = parser.parse_args()
+    
+    if args.command == "progress":
+        visualize_training_progress(args)
+    elif args.command == "interpolate":
+        interpolate_latent_space(args)
+    else:
+        parser.print_help()
